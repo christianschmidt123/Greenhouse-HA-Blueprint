@@ -1,0 +1,856 @@
+blueprint:
+  name: "Growbox Controller"
+  description: >
+    Comprehensive grow-box / grow-tent controller for Home Assistant.
+
+    Features:
+      - Monitors humidity, temperature, VOC, CO₂ and PM2.5
+      - Light scheduling for vegetative (18 h) and flowering (12 h) phases
+      - Automatic fan control based on environmental conditions
+      - Soil-moisture monitoring with pump control
+      - Air-pressure monitoring with optional automatic optimisation
+      - Timelapse / snapshot photography on a configurable interval
+      - Phase-day / phase-week counter displayed as persistent notifications
+      - Multi-level notifications (info / warning / critical) when values
+        exceed configurable thresholds
+      - Fully supports multiple independent chambers – deploy one automation
+        per chamber and give each a unique prefix
+
+  domain: automation
+  input:
+
+    # ── Chamber identification ──────────────────────────────────────────────
+    chamber_name:
+      name: Chamber name
+      description: >
+        A short, unique name for this chamber (e.g. "Chamber 1", "Veg Tent").
+        Used in notifications and persistent notifications.
+      default: "Chamber 1"
+      selector:
+        text:
+
+    # ── Growth phase ────────────────────────────────────────────────────────
+    growth_phase:
+      name: Growth phase
+      description: >
+        Current growth phase.
+        Vegetative = 18 h light / 6 h dark.
+        Flowering  = 12 h light / 12 h dark.
+      default: vegetative
+      selector:
+        select:
+          options:
+            - label: "Vegetative (18 h light)"
+              value: vegetative
+            - label: "Flowering (12 h light)"
+              value: flowering
+
+    phase_start_date:
+      name: Phase start date
+      description: >
+        The date on which the current growth phase started (YYYY-MM-DD).
+        Used to calculate elapsed days / weeks.
+      default: "2024-01-01"
+      selector:
+        date:
+
+    # ── Light schedule ───────────────────────────────────────────────────────
+    light_on_time:
+      name: Light ON time
+      description: "Time of day when the grow light turns on."
+      default: "06:00:00"
+      selector:
+        time:
+
+    light_entity:
+      name: Grow light switch / relay
+      description: "Switch or light entity that controls the grow light."
+      selector:
+        entity:
+          domain:
+            - switch
+            - light
+
+    # ── Fan ─────────────────────────────────────────────────────────────────
+    fan_entity:
+      name: Exhaust / circulation fan switch
+      description: "Switch entity that controls the fan."
+      selector:
+        entity:
+          domain: switch
+
+    fan_auto_control:
+      name: Automatic fan control
+      description: >
+        When enabled the fan is switched on/off automatically when
+        temperature or humidity thresholds are exceeded.
+      default: true
+      selector:
+        boolean:
+
+    # ── Sensors ─────────────────────────────────────────────────────────────
+    temp_sensor:
+      name: Temperature sensor
+      description: "Air temperature inside the chamber (°C)."
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+
+    humidity_sensor:
+      name: Humidity sensor
+      description: "Relative air humidity inside the chamber (%)."
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+
+    voc_sensor:
+      name: VOC sensor
+      description: "Volatile Organic Compounds sensor."
+      selector:
+        entity:
+          domain: sensor
+
+    co2_sensor:
+      name: CO₂ sensor
+      description: "CO₂ concentration sensor (ppm)."
+      selector:
+        entity:
+          domain: sensor
+
+    pm25_sensor:
+      name: PM2.5 sensor
+      description: "Particulate matter PM2.5 sensor (µg/m³)."
+      selector:
+        entity:
+          domain: sensor
+
+    soil_moisture_sensor:
+      name: Soil moisture sensor
+      description: "Soil moisture sensor (%)."
+      selector:
+        entity:
+          domain: sensor
+
+    # ── Air pressure ─────────────────────────────────────────────────────────
+    pressure_sensor:
+      name: Air-pressure sensor (optional)
+      description: "Barometric / differential pressure sensor inside the chamber."
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          device_class: pressure
+
+    pressure_auto_control:
+      name: Automatic pressure optimisation
+      description: >
+        When enabled the fan speed / run-time is adjusted to maintain
+        optimal negative pressure inside the chamber.
+      default: false
+      selector:
+        boolean:
+
+    # ── Water pump ───────────────────────────────────────────────────────────
+    pump_entity:
+      name: Water-pump switch
+      description: "Switch entity that controls the irrigation pump."
+      selector:
+        entity:
+          domain: switch
+
+    pump_run_seconds:
+      name: Pump run time (seconds)
+      description: "How many seconds the pump runs per irrigation cycle."
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 300
+          step: 5
+          unit_of_measurement: s
+
+    # ── Camera / timelapse ───────────────────────────────────────────────────
+    camera_entity:
+      name: Camera entity (optional)
+      description: "Camera entity used for timelapse snapshots."
+      default: ""
+      selector:
+        entity:
+          domain: camera
+
+    snapshot_interval_minutes:
+      name: Snapshot interval (minutes)
+      description: "How often a timelapse snapshot is taken."
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 1440
+          step: 1
+          unit_of_measurement: min
+
+    snapshot_path:
+      name: Snapshot output path
+      description: >
+        Local path where snapshots are saved, e.g.
+        /config/www/timelapse/chamber1/.
+        The directory must exist and be writable by Home Assistant.
+      default: "/config/www/timelapse/chamber1/"
+      selector:
+        text:
+
+    # ── Thresholds ────────────────────────────────────────────────────────────
+    temp_min:
+      name: Minimum temperature (°C)
+      default: 18
+      selector:
+        number:
+          min: 0
+          max: 40
+          step: 0.5
+          unit_of_measurement: "°C"
+
+    temp_max:
+      name: Maximum temperature (°C)
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 0.5
+          unit_of_measurement: "°C"
+
+    temp_critical_max:
+      name: Critical maximum temperature (°C)
+      default: 35
+      selector:
+        number:
+          min: 0
+          max: 60
+          step: 0.5
+          unit_of_measurement: "°C"
+
+    humidity_min:
+      name: Minimum humidity (%)
+      default: 40
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    humidity_max:
+      name: Maximum humidity (%)
+      default: 70
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    humidity_critical_max:
+      name: Critical maximum humidity (%)
+      default: 85
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    co2_max:
+      name: Maximum CO₂ (ppm)
+      default: 1500
+      selector:
+        number:
+          min: 400
+          max: 5000
+          step: 50
+          unit_of_measurement: ppm
+
+    co2_critical_max:
+      name: Critical maximum CO₂ (ppm)
+      default: 2000
+      selector:
+        number:
+          min: 400
+          max: 5000
+          step: 50
+          unit_of_measurement: ppm
+
+    voc_max:
+      name: Maximum VOC index
+      default: 200
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 10
+
+    voc_critical_max:
+      name: Critical maximum VOC index
+      default: 350
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 10
+
+    pm25_max:
+      name: Maximum PM2.5 (µg/m³)
+      default: 25
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 1
+          unit_of_measurement: "µg/m³"
+
+    pm25_critical_max:
+      name: Critical maximum PM2.5 (µg/m³)
+      default: 75
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 1
+          unit_of_measurement: "µg/m³"
+
+    soil_moisture_min:
+      name: Minimum soil moisture (%)
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    soil_moisture_max:
+      name: Maximum soil moisture (%)
+      default: 70
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+    # ── Notification ──────────────────────────────────────────────────────────
+    notify_target:
+      name: Notification service
+      description: >
+        Name of the notify service to use, e.g. "notify.mobile_app_myphone"
+        or "notify.persistent_notification".
+      default: "notify.persistent_notification"
+      selector:
+        text:
+
+# ── Variables ────────────────────────────────────────────────────────────────
+variables:
+  chamber_name: !input chamber_name
+  growth_phase: !input growth_phase
+  phase_start_date: !input phase_start_date
+  light_on_time: !input light_on_time
+  light_entity: !input light_entity
+  fan_entity: !input fan_entity
+  fan_auto_control: !input fan_auto_control
+  temp_sensor: !input temp_sensor
+  humidity_sensor: !input humidity_sensor
+  voc_sensor: !input voc_sensor
+  co2_sensor: !input co2_sensor
+  pm25_sensor: !input pm25_sensor
+  soil_moisture_sensor: !input soil_moisture_sensor
+  pressure_sensor: !input pressure_sensor
+  pressure_auto_control: !input pressure_auto_control
+  pump_entity: !input pump_entity
+  pump_run_seconds: !input pump_run_seconds
+  camera_entity: !input camera_entity
+  snapshot_interval_minutes: !input snapshot_interval_minutes
+  snapshot_path: !input snapshot_path
+  notify_target: !input notify_target
+  # Thresholds
+  temp_min: !input temp_min
+  temp_max: !input temp_max
+  temp_critical_max: !input temp_critical_max
+  humidity_min: !input humidity_min
+  humidity_max: !input humidity_max
+  humidity_critical_max: !input humidity_critical_max
+  co2_max: !input co2_max
+  co2_critical_max: !input co2_critical_max
+  voc_max: !input voc_max
+  voc_critical_max: !input voc_critical_max
+  pm25_max: !input pm25_max
+  pm25_critical_max: !input pm25_critical_max
+  soil_moisture_min: !input soil_moisture_min
+  soil_moisture_max: !input soil_moisture_max
+  # Derived
+  light_hours: "{{ 18 if growth_phase == 'vegetative' else 12 }}"
+  light_off_time: >
+    {% set h = light_on_time.split(':')[0] | int %}
+    {% set lh = 18 if growth_phase == 'vegetative' else 12 %}
+    {% set off_h = (h + lh) % 24 %}
+    {{ '%02d:00:00' % off_h }}
+  phase_days: >
+    {% set start = strptime(phase_start_date, '%Y-%m-%d') %}
+    {{ ((now() - start).days) }}
+  phase_weeks: >
+    {% set start = strptime(phase_start_date, '%Y-%m-%d') %}
+    {{ ((now() - start).days // 7) }}
+
+# ── Triggers ─────────────────────────────────────────────────────────────────
+trigger:
+  # Light ON
+  - platform: time
+    at: !input light_on_time
+    id: light_on
+
+  # Light OFF (derived from light_on_time + light_hours; we use a template trigger)
+  - platform: template
+    value_template: >
+      {% set h = light_on_time.split(':')[0] | int %}
+      {% set lh = 18 if growth_phase == 'vegetative' else 12 %}
+      {% set off_h = (h + lh) % 24 %}
+      {{ now().hour == off_h and now().minute == 0 and now().second < 5 }}
+    id: light_off
+
+  # Periodic sensor check (every 5 minutes)
+  - platform: time_pattern
+    minutes: "/5"
+    id: sensor_check
+
+  # Timelapse snapshot
+  - platform: time_pattern
+    minutes: !input snapshot_interval_minutes
+    id: snapshot
+
+  # Soil moisture – pump needed
+  - platform: numeric_state
+    entity_id: !input soil_moisture_sensor
+    below: !input soil_moisture_min
+    id: soil_dry
+
+  # Soil moisture – pump stop
+  - platform: numeric_state
+    entity_id: !input soil_moisture_sensor
+    above: !input soil_moisture_max
+    id: soil_wet
+
+  # Temperature exceeded warning
+  - platform: numeric_state
+    entity_id: !input temp_sensor
+    above: !input temp_max
+    id: temp_high_warn
+
+  # Temperature critical
+  - platform: numeric_state
+    entity_id: !input temp_sensor
+    above: !input temp_critical_max
+    id: temp_high_crit
+
+  # Temperature low warning
+  - platform: numeric_state
+    entity_id: !input temp_sensor
+    below: !input temp_min
+    id: temp_low_warn
+
+  # Humidity high warning
+  - platform: numeric_state
+    entity_id: !input humidity_sensor
+    above: !input humidity_max
+    id: humidity_high_warn
+
+  # Humidity critical
+  - platform: numeric_state
+    entity_id: !input humidity_sensor
+    above: !input humidity_critical_max
+    id: humidity_high_crit
+
+  # Humidity low warning
+  - platform: numeric_state
+    entity_id: !input humidity_sensor
+    below: !input humidity_min
+    id: humidity_low_warn
+
+  # CO₂ warning
+  - platform: numeric_state
+    entity_id: !input co2_sensor
+    above: !input co2_max
+    id: co2_high_warn
+
+  # CO₂ critical
+  - platform: numeric_state
+    entity_id: !input co2_sensor
+    above: !input co2_critical_max
+    id: co2_high_crit
+
+  # VOC warning
+  - platform: numeric_state
+    entity_id: !input voc_sensor
+    above: !input voc_max
+    id: voc_high_warn
+
+  # VOC critical
+  - platform: numeric_state
+    entity_id: !input voc_sensor
+    above: !input voc_critical_max
+    id: voc_high_crit
+
+  # PM2.5 warning
+  - platform: numeric_state
+    entity_id: !input pm25_sensor
+    above: !input pm25_max
+    id: pm25_high_warn
+
+  # PM2.5 critical
+  - platform: numeric_state
+    entity_id: !input pm25_sensor
+    above: !input pm25_critical_max
+    id: pm25_high_crit
+
+# ── Conditions ───────────────────────────────────────────────────────────────
+condition: []
+
+# ── Actions ──────────────────────────────────────────────────────────────────
+action:
+  - choose:
+
+      # ── Light ON ──────────────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: light_on
+        sequence:
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input light_entity
+          - service: persistent_notification.create
+            data:
+              notification_id: "growbox_phase_{{ chamber_name | slugify }}"
+              title: "{{ chamber_name }} – Phase status"
+              message: >
+                Phase: {{ growth_phase | capitalize }}
+                Day {{ phase_days }} (Week {{ phase_weeks }}) –
+                Light on for {{ light_hours }} h/day.
+                Light ON at {{ light_on_time }}, OFF at {{ light_off_time }}.
+
+      # ── Light OFF ─────────────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: light_off
+        sequence:
+          - service: homeassistant.turn_off
+            target:
+              entity_id: !input light_entity
+
+      # ── Periodic sensor check ─────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: sensor_check
+        sequence:
+          # Auto fan: turn on when temp or humidity is too high
+          - if:
+              - condition: template
+                value_template: "{{ fan_auto_control }}"
+            then:
+              - if:
+                  - condition: or
+                    conditions:
+                      - condition: numeric_state
+                        entity_id: !input temp_sensor
+                        above: !input temp_max
+                      - condition: numeric_state
+                        entity_id: !input humidity_sensor
+                        above: !input humidity_max
+                then:
+                  - service: homeassistant.turn_on
+                    target:
+                      entity_id: !input fan_entity
+                else:
+                  - if:
+                      - condition: and
+                        conditions:
+                          - condition: numeric_state
+                            entity_id: !input temp_sensor
+                            below: !input temp_max
+                          - condition: numeric_state
+                            entity_id: !input humidity_sensor
+                            below: !input humidity_max
+                    then:
+                      - service: homeassistant.turn_off
+                        target:
+                          entity_id: !input fan_entity
+          # Pressure auto-control: turn on fan when pressure is too low
+          - if:
+              - condition: template
+                value_template: >
+                  {{ pressure_auto_control and pressure_sensor != '' }}
+            then:
+              - service: homeassistant.turn_on
+                target:
+                  entity_id: !input fan_entity
+
+      # ── Timelapse snapshot ────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: snapshot
+          - condition: template
+            value_template: "{{ camera_entity != '' }}"
+        sequence:
+          - service: camera.snapshot
+            target:
+              entity_id: !input camera_entity
+            data:
+              filename: >
+                {{ snapshot_path }}{{ chamber_name | slugify }}_{{
+                  now().strftime('%Y%m%d_%H%M%S') }}.jpg
+
+      # ── Soil dry – start pump ─────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: soil_dry
+        sequence:
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input pump_entity
+          - delay:
+              seconds: !input pump_run_seconds
+          - service: homeassistant.turn_off
+            target:
+              entity_id: !input pump_entity
+          - service: !input notify_target
+            data:
+              title: "🌱 {{ chamber_name }} – Irrigation"
+              message: >
+                Soil moisture was below {{ soil_moisture_min }}%.
+                Pump ran for {{ pump_run_seconds }} seconds.
+
+      # ── Soil wet – stop pump (safety) ─────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: soil_wet
+        sequence:
+          - service: homeassistant.turn_off
+            target:
+              entity_id: !input pump_entity
+
+      # ── Temperature high WARNING ───────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: temp_high_warn
+          - condition: numeric_state
+            entity_id: !input temp_sensor
+            below: !input temp_critical_max
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ fan_auto_control }}"
+            then:
+              - service: homeassistant.turn_on
+                target:
+                  entity_id: !input fan_entity
+          - service: !input notify_target
+            data:
+              title: "⚠️ {{ chamber_name }} – High Temperature"
+              message: >
+                Temperature {{ states(temp_sensor) }}°C exceeds the
+                warning threshold of {{ temp_max }}°C.
+                Fan turned on automatically (if enabled).
+                Please check the chamber ventilation.
+
+      # ── Temperature CRITICAL ───────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: temp_high_crit
+        sequence:
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input fan_entity
+          - service: !input notify_target
+            data:
+              title: "🚨 {{ chamber_name }} – CRITICAL Temperature"
+              message: >
+                CRITICAL: Temperature {{ states(temp_sensor) }}°C exceeds
+                {{ temp_critical_max }}°C!
+                Immediate manual intervention required.
+                Fan forced ON. Check cooling / ventilation immediately.
+
+      # ── Temperature LOW warning ────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: temp_low_warn
+        sequence:
+          - service: !input notify_target
+            data:
+              title: "⚠️ {{ chamber_name }} – Low Temperature"
+              message: >
+                Temperature {{ states(temp_sensor) }}°C is below the
+                minimum threshold of {{ temp_min }}°C.
+                Consider checking your heating or insulation.
+
+      # ── Humidity high WARNING ──────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: humidity_high_warn
+          - condition: numeric_state
+            entity_id: !input humidity_sensor
+            below: !input humidity_critical_max
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ fan_auto_control }}"
+            then:
+              - service: homeassistant.turn_on
+                target:
+                  entity_id: !input fan_entity
+          - service: !input notify_target
+            data:
+              title: "⚠️ {{ chamber_name }} – High Humidity"
+              message: >
+                Humidity {{ states(humidity_sensor) }}% exceeds the warning
+                threshold of {{ humidity_max }}%.
+                Fan turned on automatically (if enabled).
+                Risk of mould – check ventilation.
+
+      # ── Humidity CRITICAL ──────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: humidity_high_crit
+        sequence:
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input fan_entity
+          - service: !input notify_target
+            data:
+              title: "🚨 {{ chamber_name }} – CRITICAL Humidity"
+              message: >
+                CRITICAL: Humidity {{ states(humidity_sensor) }}% exceeds
+                {{ humidity_critical_max }}%!
+                Immediate action required – high risk of mould.
+                Fan forced ON. Manually inspect the chamber.
+
+      # ── Humidity LOW warning ───────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: humidity_low_warn
+        sequence:
+          - service: !input notify_target
+            data:
+              title: "⚠️ {{ chamber_name }} – Low Humidity"
+              message: >
+                Humidity {{ states(humidity_sensor) }}% is below the
+                minimum threshold of {{ humidity_min }}%.
+                Consider using a humidifier.
+
+      # ── CO₂ high WARNING ──────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: co2_high_warn
+          - condition: numeric_state
+            entity_id: !input co2_sensor
+            below: !input co2_critical_max
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ fan_auto_control }}"
+            then:
+              - service: homeassistant.turn_on
+                target:
+                  entity_id: !input fan_entity
+          - service: !input notify_target
+            data:
+              title: "⚠️ {{ chamber_name }} – High CO₂"
+              message: >
+                CO₂ level {{ states(co2_sensor) }} ppm exceeds the warning
+                threshold of {{ co2_max }} ppm.
+                Fan turned on automatically (if enabled).
+                Increase ventilation.
+
+      # ── CO₂ CRITICAL ──────────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: co2_high_crit
+        sequence:
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input fan_entity
+          - service: !input notify_target
+            data:
+              title: "🚨 {{ chamber_name }} – CRITICAL CO₂"
+              message: >
+                CRITICAL: CO₂ level {{ states(co2_sensor) }} ppm exceeds
+                {{ co2_critical_max }} ppm!
+                Immediate manual intervention required.
+                Fan forced ON – open chamber / improve ventilation now.
+
+      # ── VOC high WARNING ───────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: voc_high_warn
+          - condition: numeric_state
+            entity_id: !input voc_sensor
+            below: !input voc_critical_max
+        sequence:
+          - service: !input notify_target
+            data:
+              title: "⚠️ {{ chamber_name }} – High VOC"
+              message: >
+                VOC index {{ states(voc_sensor) }} exceeds the warning
+                threshold of {{ voc_max }}.
+                Increase ventilation and check for chemical sources.
+
+      # ── VOC CRITICAL ───────────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: voc_high_crit
+        sequence:
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input fan_entity
+          - service: !input notify_target
+            data:
+              title: "🚨 {{ chamber_name }} – CRITICAL VOC"
+              message: >
+                CRITICAL: VOC index {{ states(voc_sensor) }} exceeds
+                {{ voc_critical_max }}!
+                Immediate action required – potential air quality hazard.
+                Fan forced ON.
+
+      # ── PM2.5 high WARNING ─────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: pm25_high_warn
+          - condition: numeric_state
+            entity_id: !input pm25_sensor
+            below: !input pm25_critical_max
+        sequence:
+          - service: !input notify_target
+            data:
+              title: "⚠️ {{ chamber_name }} – High PM2.5"
+              message: >
+                PM2.5 level {{ states(pm25_sensor) }} µg/m³ exceeds the
+                warning threshold of {{ pm25_max }} µg/m³.
+                Check air filtration.
+
+      # ── PM2.5 CRITICAL ─────────────────────────────────────────────────────
+      - conditions:
+          - condition: trigger
+            id: pm25_high_crit
+        sequence:
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input fan_entity
+          - service: !input notify_target
+            data:
+              title: "🚨 {{ chamber_name }} – CRITICAL PM2.5"
+              message: >
+                CRITICAL: PM2.5 level {{ states(pm25_sensor) }} µg/m³
+                exceeds {{ pm25_critical_max }} µg/m³!
+                Immediate action required – check/replace filters now.
+                Fan forced ON.
+
+mode: parallel
+max: 10
