@@ -1,0 +1,30 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# rest_commands.yaml
+# Include this in your configuration.yaml:
+#
+#   rest_command: !include blueprints/configuration/rest_commands.yaml
+#
+# This REST command is used by the Growbox Controller blueprint to forward the
+# latest timelapse snapshot to an external nutrient-deficiency analysis service.
+#
+# The service must accept a POST request with JSON body:
+#   { "snapshot": "/path/to/latest.jpg",
+#     "chamber": "Chamber 1" }
+# and return:
+#   { "deficiency": "nitrogen", "confidence": 0.82 }
+# or:
+#   { "deficiency": "none", "confidence": 1.0 }
+#
+# Example open-source implementations:
+#   - PlantCV (https://plantcv.readthedocs.io/)
+#   - A custom Flask/FastAPI wrapper around a PyTorch / TFLite model
+# ─────────────────────────────────────────────────────────────────────────────
+
+growbox_nutrient_check:
+  url: "{{ url }}"
+  method: POST
+  headers:
+    Content-Type: application/json
+  payload: >
+    {"snapshot": "{{ snapshot }}", "chamber": "{{ chamber }}"}
+  timeout: 30

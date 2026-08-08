@@ -1,0 +1,111 @@
+blueprint:
+  name: "Growbox – Compile Timelapse Video"
+  description: >
+    Script blueprint that compiles all timelapse JPEG snapshots in a folder
+    into an MP4 video using ffmpeg.
+
+    Prerequisites:
+      - ffmpeg must be available in the HA environment.
+        It is pre-installed in Home Assistant OS.
+        For Docker / manual installs add ffmpeg to your container image.
+      - The snapshot directory must be readable by Home Assistant.
+
+    Usage:
+      1. Import this blueprint under Settings → Blueprints → Script blueprints.
+      2. Create a script from it and set the snapshot folder and output path.
+      3. Call the script from a dashboard button, an automation, or manually
+         from Developer Tools → Services.
+
+  domain: script
+  input:
+    snapshot_directory:
+      name: Snapshot directory
+      description: >
+        Absolute path to the folder containing the timelapse JPEG files,
+        e.g. /config/www/timelapse/chamber1/
+      default: "/config/www/timelapse/chamber1/"
+      selector:
+        text:
+
+    output_video_path:
+      name: Output video path
+      description: >
+        Full path (including filename) for the resulting MP4 file, e.g.
+        /config/www/timelapse/chamber1_timelapse.mp4
+      default: "/config/www/timelapse/chamber1_timelapse.mp4"
+      selector:
+        text:
+
+    frame_rate:
+      name: Frame rate (fps)
+      description: "Frames per second in the output video."
+      default: 24
+      selector:
+        number:
+          min: 1
+          max: 60
+          step: 1
+          unit_of_measurement: fps
+
+    video_width:
+      name: Output width (pixels)
+      description: >
+        Width of the output video. Height is scaled proportionally.
+        Set to 0 to keep the original resolution.
+      default: 1920
+      selector:
+        number:
+          min: 0
+          max: 3840
+          step: 2
+          unit_of_measurement: px
+
+    notify_on_completion:
+      name: Send notification when done
+      description: "Send a persistent notification when the video is ready."
+      default: true
+      selector:
+        boolean:
+
+variables:
+  snapshot_directory: !input snapshot_directory
+  output_video_path: !input output_video_path
+  frame_rate: !input frame_rate
+  video_width: !input video_width
+  notify_on_completion: !input notify_on_completion
+  # Build the scale filter string; if width == 0 skip scaling
+  scale_filter: >
+    {{ '' if video_width == 0 else '-vf scale=' ~ video_width ~ ':-2' }}
+
+sequence:
+  # Remove the old video so ffmpeg can overwrite cleanly
+  - service: shell_command.growbox_remove_old_video
+    data:
+      path: "{{ output_video_path }}"
+
+  # Compile frames into MP4
+  # ffmpeg reads frames in alphabetical (= chronological) order.
+  # -pattern_type glob requires the glob pattern quoted for shell expansion.
+  - service: shell_command.growbox_compile_timelapse
+    data:
+      snapshot_dir: "{{ snapshot_directory }}"
+      output: "{{ output_video_path }}"
+      fps: "{{ frame_rate }}"
+      scale: "{{ scale_filter }}"
+
+  - if:
+      - condition: template
+        value_template: "{{ notify_on_completion }}"
+    then:
+      - service: persistent_notification.create
+        data:
+          notification_id: "growbox_timelapse_done"
+          title: "🎬 Timelapse video compiled"
+          message: >
+            The timelapse video has been written to:
+            {{ output_video_path }}
+            You can view it at:
+            /local/{{ output_video_path | replace('/config/www/', '') }}
+
+mode: single
+icon: mdi:video

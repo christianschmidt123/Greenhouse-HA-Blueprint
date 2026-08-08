@@ -1,0 +1,22 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# shell_commands.yaml
+# Include this file in your configuration.yaml:
+#
+#   shell_command: !include blueprints/configuration/shell_commands.yaml
+#
+# These shell commands are required by the Growbox Controller blueprint.
+# Adjust paths to match your setup.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Compile timelapse JPEG frames into an MP4 video.
+# Called by the growbox_compile_timelapse script blueprint.
+growbox_compile_timelapse: >
+  /config/blueprints/scripts/compile_timelapse.sh
+  "{{ snapshot_dir }}"
+  "{{ output }}"
+  "{{ fps }}"
+  "{{ scale }}"
+
+# Remove the previous timelapse video before re-compiling.
+growbox_remove_old_video: >
+  rm -f "{{ path }}"
