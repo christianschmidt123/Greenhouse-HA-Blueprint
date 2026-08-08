@@ -13,7 +13,11 @@ blueprint:
       - Timelapse / snapshot photography on a configurable interval
       - One-click timelapse → video compilation via shell_command
       - Phase-day / phase-week counter displayed as persistent notification
-      - Multi-level notifications (info / warning ⚠️ / critical 🚨)
+      - Exhaust-fan (Abluft) plausibility diagnostics: detects when the fan
+          runs but RLF does not drop and sends a root-cause analysis notification
+      - External reference sensor support (temp + RLF outside the tent) to
+          determine whether room conditions allow further improvement
+      - Active carbon filter (AKF) lifetime tracking with maintenance reminders
       - Repotting heuristic: notifies when soil-moisture drain rate spikes
       - Plant-height tracking with growth-stall notification
       - Nutrient-deficiency REST-hook placeholder for external ML/CV service
@@ -479,6 +483,100 @@ blueprint:
           step: 1
           unit_of_measurement: "%"
 
+    # ── External reference sensors (outside the tent) ────────────────────────
+    ext_temp_sensor:
+      name: External temperature sensor (optional)
+      description: >
+        Temperature sensor located OUTSIDE the grow tent / in the room.
+        Used to validate whether the tent environment can realistically be
+        improved by ventilation. Leave empty to disable external comparison.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+
+    ext_humidity_sensor:
+      name: External humidity sensor / RLF (optional)
+      description: >
+        Relative humidity sensor located OUTSIDE the grow tent / in the room.
+        If room humidity is already very high, the exhaust fan cannot lower
+        tent humidity further – this context is included in diagnostic alerts.
+        Leave empty to disable external comparison.
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+
+    # ── Exhaust fan / AKF diagnostics ─────────────────────────────────────────
+    exhaust_fan_rated_flow:
+      name: Exhaust fan rated airflow (m³/h)
+      description: >
+        Nominal airflow of the exhaust fan as stated on its data sheet (m³/h).
+        Used in the plausibility check to estimate whether the fan should be
+        able to lower tent humidity. Set to 0 to skip airflow plausibility.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 2000
+          step: 10
+          unit_of_measurement: "m³/h"
+
+    tent_volume_m3:
+      name: Grow tent volume (m³)
+      description: >
+        Approximate inner volume of the grow tent (width × depth × height in
+        metres). Used together with the fan airflow to estimate air changes per
+        hour (ACH). Set to 0 to skip ACH plausibility.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.1
+          unit_of_measurement: "m³"
+
+    exhaust_diag_humidity_drop_expected:
+      name: Expected RLF drop when exhaust runs (% / 30 min)
+      description: >
+        Minimum expected humidity reduction (in percentage points) within
+        30 minutes when the exhaust fan is running. If actual humidity is still
+        above the ON threshold after this period the system sends a diagnostic
+        alert. Set to 0 to disable this check.
+      default: 3
+      selector:
+        number:
+          min: 0
+          max: 30
+          step: 0.5
+          unit_of_measurement: "%"
+
+    akf_install_date:
+      name: Active carbon filter (AKF) installation date (optional)
+      description: >
+        Date on which the active carbon filter was last replaced (YYYY-MM-DD).
+        The blueprint tracks filter age and sends a maintenance reminder when
+        the filter has been in service for longer than the expected lifetime.
+        Leave empty to disable filter age tracking.
+      default: ""
+      selector:
+        date:
+
+    akf_lifetime_days:
+      name: AKF expected lifetime (days)
+      description: >
+        Manufacturer's expected lifetime of the active carbon filter (days).
+        A reminder notification is sent when this threshold is exceeded.
+      default: 180
+      selector:
+        number:
+          min: 30
+          max: 730
+          step: 1
+          unit_of_measurement: days
+
     # ── Notification ───────────────────────────────────────────────────────────
     notify_target:
       name: Notification service
@@ -523,6 +621,15 @@ variables:
   video_fps: !input video_fps
   nutrient_webhook_url: !input nutrient_webhook_url
   notify_target: !input notify_target
+  # External reference sensors
+  ext_temp_sensor: !input ext_temp_sensor
+  ext_humidity_sensor: !input ext_humidity_sensor
+  # Exhaust / AKF diagnostics
+  exhaust_fan_rated_flow: !input exhaust_fan_rated_flow
+  tent_volume_m3: !input tent_volume_m3
+  exhaust_diag_humidity_drop_expected: !input exhaust_diag_humidity_drop_expected
+  akf_install_date: !input akf_install_date
+  akf_lifetime_days: !input akf_lifetime_days
   # Thresholds
   temp_min: !input temp_min
   temp_max: !input temp_max
@@ -580,6 +687,11 @@ trigger:
   - platform: time_pattern
     minutes: !input snapshot_interval_minutes
     id: snapshot
+
+  # Diagnostic / plausibility check (every 30 minutes)
+  - platform: time_pattern
+    minutes: "/30"
+    id: diag_check
 
   # Daily height / repotting check (08:00)
   - platform: time
@@ -856,6 +968,136 @@ action:
                   url: "{{ nutrient_webhook_url }}"
                   snapshot: "{{ latest_snapshot }}"
                   chamber: "{{ chamber_name }}"
+
+      # ════════════════════════════════════════════════════════════════════════
+      # DIAGNOSTIC / PLAUSIBILITY CHECK (every 30 min)
+      # Checks whether the exhaust fan and AKF (active carbon filter) are
+      # performing as expected. If humidity remains high despite the fan
+      # running, a detailed diagnostic notification is sent.
+      # ════════════════════════════════════════════════════════════════════════
+      - conditions:
+          - condition: trigger
+            id: diag_check
+        sequence:
+          - variables:
+              _tent_rh: "{{ states(humidity_sensor) | float(0) }}"
+              _tent_temp: "{{ states(temp_sensor) | float(0) }}"
+              _ext_rh: >
+                {% if ext_humidity_sensor != '' %}
+                  {{ states(ext_humidity_sensor) | float(-1) }}
+                {% else %}
+                  -1
+                {% endif %}
+              _ext_temp: >
+                {% if ext_temp_sensor != '' %}
+                  {{ states(ext_temp_sensor) | float(-99) }}
+                {% else %}
+                  -99
+                {% endif %}
+              _exhaust_on: "{{ is_state(exhaust_fan_entity, 'on') }}"
+              _ach: >
+                {% if exhaust_fan_rated_flow | float(0) > 0 and tent_volume_m3 | float(0) > 0 %}
+                  {{ (exhaust_fan_rated_flow | float) / (tent_volume_m3 | float) | round(1) }}
+                {% else %}
+                  -1
+                {% endif %}
+              _akf_age_days: >
+                {% if akf_install_date != '' %}
+                  {% set inst = strptime(akf_install_date, '%Y-%m-%d') %}
+                  {{ (now() - inst).days }}
+                {% else %}
+                  -1
+                {% endif %}
+              _akf_expired: >
+                {% if akf_install_date != '' %}
+                  {{ (now() - strptime(akf_install_date, '%Y-%m-%d')).days >= (akf_lifetime_days | int) }}
+                {% else %}
+                  false
+                {% endif %}
+          # ── Exhaust fan plausibility: fan ON but RLF still high ──────────
+          - if:
+              - condition: template
+                value_template: >
+                  {{ exhaust_diag_humidity_drop_expected | float(0) > 0
+                     and _exhaust_on
+                     and _tent_rh > exhaust_humidity_on | float(0) }}
+            then:
+              - variables:
+                  _diag_msg: >
+                    🔍 {{ chamber_name }} – Lüfter-Diagnose (Abluft / RLF-Plausibilitätsprüfung)
+
+                    Der Ablüfter läuft, aber die Relative Luftfeuchtigkeit (RLF) im Zelt
+                    liegt weiterhin bei {{ _tent_rh | round(1) }}% (Grenzwert: {{ exhaust_humidity_on }}%).
+                    Erwartete Absenkung in 30 Min.: ≥ {{ exhaust_diag_humidity_drop_expected }}%.
+
+                    📋 Mögliche Ursachen & was geprüft werden sollte:
+                    {% if _acf_expired is defined and _akf_expired %}
+                    ⚠️  AKF (Aktivkohlefilter) ist seit {{ _akf_age_days }} Tagen installiert
+                        (Lebensdauer: {{ akf_lifetime_days }} Tage) – Filter ist überfällig!
+                        → Filter reinigen oder austauschen.
+                    {% elif _akf_age_days | int > 0 %}
+                    • AKF-Alter: {{ _akf_age_days }} Tage / {{ akf_lifetime_days }} Tage Lebensdauer.
+                      Bei stark verstopftem Filter sinkt der Volumenstrom erheblich.
+                    {% endif %}
+                    {% if _ach | float(-1) > 0 %}
+                    • Berechnete Luftwechselrate (ACH): {{ _ach }} h⁻¹.
+                      Empfohlen: mindestens 20 h⁻¹ für Growzelte.
+                      {% if _ach | float < 20 %}
+                      → ACH zu niedrig – prüfe ob Lüfterdrehzahl korrekt ist oder ob
+                        der Filter den Luftstrom stark drosselt.
+                      {% endif %}
+                    {% endif %}
+                    • Prüfe, ob Lüftungsschläuche geknickt oder verstopft sind.
+                    • Prüfe, ob Zu- und Abluftöffnungen frei sind (keine Blockaden).
+                    • Prüfe, ob der Lüfter tatsächlich auf voller Leistung läuft
+                      (Lüfterdrehzahl / Steuereinheit kontrollieren).
+                    • Prüfe auf undichte Stellen im Zelt (Licht- und Lüftungsöffnungen).
+                    {% if _ext_rh | float(-1) >= 0 %}
+
+                    🌡️ Externer Referenzsensor (Raum außerhalb des Zeltes):
+                       Raumtemperatur:  {{ _ext_temp | round(1) if _ext_temp | float(-99) > -99 else 'kein Sensor' }} °C
+                       Raum-RLF:        {{ _ext_rh | round(1) }}%
+
+                    {% if _ext_rh | float >= _tent_rh | float - 5 %}
+                    ⚠️  Die Raumluft hat bereits eine RLF von {{ _ext_rh | round(1) }}%,
+                        was sehr nahe an der Zelt-RLF ({{ _tent_rh | round(1) }}%) liegt.
+                        Abluftbetrieb kann die RLF im Zelt unter diesen Bedingungen NICHT
+                        wesentlich senken!
+                        → Sorge zuerst für ausreichende Raumbelüftung / Entfeuchtung im Raum.
+                    {% else %}
+                    ✅  Raumluft ({{ _ext_rh | round(1) }}% RLF) ist trockener als das Zelt –
+                        Abluftbetrieb sollte prinzipiell die RLF im Zelt senken können.
+                        Prüfe mechanische Ursachen (Filter, Schläuche, Lüfterdrehzahl).
+                    {% endif %}
+                    {% else %}
+                    ℹ️  Kein externer Referenzsensor konfiguriert.
+                        Um zu beurteilen, ob die Raumluft eine weitere Absenkung der Zelt-RLF
+                        erlaubt, einen externen Temp-/RLF-Sensor eintragen.
+                    {% endif %}
+
+                    Aktueller Zeltstatus:
+                      Temp: {{ _tent_temp | round(1) }}°C | RLF: {{ _tent_rh | round(1) }}%
+                      Phase: {{ growth_phase | capitalize }} – Tag {{ phase_days }} / Woche {{ phase_weeks }}
+              - service: !input notify_target
+                data:
+                  title: "🔍 {{ chamber_name }} – Lüfter-Diagnose"
+                  message: "{{ _diag_msg }}"
+
+          # ── AKF lifetime reminder (standalone, even if fan is working) ───
+          - if:
+              - condition: template
+                value_template: "{{ _akf_expired }}"
+            then:
+              - service: persistent_notification.create
+                data:
+                  notification_id: "growbox_akf_{{ chamber_name | slugify }}"
+                  title: "🧹 {{ chamber_name }} – AKF-Wartung fällig"
+                  message: >
+                    Der Aktivkohlefilter (AKF) ist seit {{ _akf_age_days }} Tagen
+                    installiert. Die empfohlene Lebensdauer von {{ akf_lifetime_days }}
+                    Tagen wurde überschritten.
+                    → Filter reinigen oder austauschen, um optimalen Luftstrom und
+                      Geruchsfilterung sicherzustellen.
 
       # ════════════════════════════════════════════════════════════════════════
       # DAILY CHECK – height stall & repotting heuristic
