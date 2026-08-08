@@ -538,21 +538,6 @@ blueprint:
           step: 0.1
           unit_of_measurement: "m³"
 
-    exhaust_diag_humidity_drop_expected:
-      name: Expected RLF drop when exhaust runs (% / 30 min)
-      description: >
-        Minimum expected humidity reduction (in percentage points) within
-        30 minutes when the exhaust fan is running. If actual humidity is still
-        above the ON threshold after this period the system sends a diagnostic
-        alert. Set to 0 to disable this check.
-      default: 3
-      selector:
-        number:
-          min: 0
-          max: 30
-          step: 0.5
-          unit_of_measurement: "%"
-
     akf_install_date:
       name: Active carbon filter (AKF) installation date (optional)
       description: >
@@ -627,7 +612,6 @@ variables:
   # Exhaust / AKF diagnostics
   exhaust_fan_rated_flow: !input exhaust_fan_rated_flow
   tent_volume_m3: !input tent_volume_m3
-  exhaust_diag_humidity_drop_expected: !input exhaust_diag_humidity_drop_expected
   akf_install_date: !input akf_install_date
   akf_lifetime_days: !input akf_lifetime_days
   # Thresholds
@@ -997,8 +981,42 @@ action:
               _exhaust_on: "{{ is_state(exhaust_fan_entity, 'on') }}"
               _ach: >
                 {% if exhaust_fan_rated_flow | float(0) > 0 and tent_volume_m3 | float(0) > 0 %}
-                  {{ (exhaust_fan_rated_flow | float) / (tent_volume_m3 | float) | round(1) }}
+                  {{ ((exhaust_fan_rated_flow | float) / (tent_volume_m3 | float)) | round(1) }}
                 {% else %}
+                  -1
+                {% endif %}
+              # Physically achievable RLF ceiling: how much lower can the tent
+              # RLF actually get? It cannot drop below the external (room) RLF.
+              # If no external sensor is available we assume unlimited potential.
+              _rh_headroom: >
+                {% if _ext_rh | float(-1) >= 0 %}
+                  {{ [(_tent_rh | float(0)) - (_ext_rh | float(0)), 0] | max | round(1) }}
+                {% else %}
+                  999
+                {% endif %}
+              # Expected RLF drop in 30 minutes, derived from physics:
+              #   - In 30 min the fan exchanges (ACH / 2) tent volumes
+              #   - Each air-change replaces tent air (RLF_tent) with fresh air
+              #     (RLF_ext or 0 if unknown). The expected new RLF is:
+              #     RLF_new = RLF_tent * (1 - ACH/2)^1  ≈ RLF_tent * exp(-ACH/2)
+              #     but for simplicity we use a linear model: drop ≈ headroom * (1 - exp(-ACH/2))
+              #   - We cap the achievable drop at the available headroom.
+              #   - If fan specs are unknown we fall back to a conservative 2 %.
+              _expected_drop: >
+                {% set ach = _ach | float(-1) %}
+                {% set headroom = _rh_headroom | float(0) %}
+                {% if ach > 0 and headroom < 999 %}
+                  {# Physical model: fraction of headroom exchanged in 0.5 h #}
+                  {% set exchanges_30min = ach / 2.0 %}
+                  {% set fraction = 1 - (2.718281828 ** (-exchanges_30min)) %}
+                  {{ [headroom * fraction, headroom] | min | round(1) }}
+                {% elif ach > 0 %}
+                  {# No external sensor – use ACH alone, assume 80% RH saturation delta #}
+                  {% set exchanges_30min = ach / 2.0 %}
+                  {% set fraction = 1 - (2.718281828 ** (-exchanges_30min)) %}
+                  {{ (_tent_rh | float(0) * fraction) | round(1) }}
+                {% else %}
+                  {# No fan specs available – cannot compute, use sentinel -1 #}
                   -1
                 {% endif %}
               _akf_age_days: >
@@ -1015,10 +1033,17 @@ action:
                   false
                 {% endif %}
           # ── Exhaust fan plausibility: fan ON but RLF still high ──────────
+          # Trigger only when:
+          #   • expected drop could be computed (≥ 0)
+          #   • the achievable headroom is meaningful (> 1 %)
+          #     i.e. it makes physical sense to expect improvement
+          #   • fan is running
+          #   • tent RLF is still above the ON threshold
           - if:
               - condition: template
                 value_template: >
-                  {{ exhaust_diag_humidity_drop_expected | float(0) > 0
+                  {{ _expected_drop | float(-1) >= 0
+                     and _rh_headroom | float(0) > 1
                      and _exhaust_on
                      and _tent_rh > exhaust_humidity_on | float(0) }}
             then:
@@ -1028,55 +1053,67 @@ action:
 
                     Der Ablüfter läuft, aber die Relative Luftfeuchtigkeit (RLF) im Zelt
                     liegt weiterhin bei {{ _tent_rh | round(1) }}% (Grenzwert: {{ exhaust_humidity_on }}%).
-                    Erwartete Absenkung in 30 Min.: ≥ {{ exhaust_diag_humidity_drop_expected }}%.
+
+                    📐 Physikalische Erwartungsrechnung:
+                    {% if _ach | float(-1) > 0 %}
+                    • Luftwechselrate (ACH): {{ _ach }} h⁻¹
+                      ({{ exhaust_fan_rated_flow }} m³/h ÷ {{ tent_volume_m3 }} m³)
+                      Empfohlen für Growzelte: ≥ 20 h⁻¹.
+                      {% if _ach | float < 20 %}
+                      → ACH zu niedrig! Bei vollem Volumenstrom sollte der Lüfter
+                        stärker sein oder der Filter drosselt den Luftstrom.
+                      {% endif %}
+                    {% else %}
+                    • Lüfterdaten nicht vollständig – ACH konnte nicht berechnet werden.
+                      (Lüfterstärke und Zeltvolumen eintragen für präzise Diagnose.)
+                    {% endif %}
+                    {% if _ext_rh | float(-1) >= 0 %}
+                    • Raum-RLF (extern): {{ _ext_rh | round(1) }}%
+                      Zelt-RLF (intern):  {{ _tent_rh | round(1) }}%
+                      Verfügbares Absenkpotenzial (Headroom): {{ _rh_headroom | round(1) }}%
+                      → Physikalisch erreichbare Absenkung in 30 Min.: ~{{ _expected_drop | round(1) }}%
+                        (Zelt-RLF kann NICHT unter die Raum-RLF sinken!)
+                    {% else %}
+                    • Kein externer Referenzsensor – Absenkpotenzial unbekannt.
+                      Berechnete Absenkung in 30 Min. (ohne Raumlimit): ~{{ _expected_drop | round(1) }}%
+                    {% endif %}
 
                     📋 Mögliche Ursachen & was geprüft werden sollte:
-                    {% if _acf_expired is defined and _akf_expired %}
+                    {% if _akf_expired %}
                     ⚠️  AKF (Aktivkohlefilter) ist seit {{ _akf_age_days }} Tagen installiert
                         (Lebensdauer: {{ akf_lifetime_days }} Tage) – Filter ist überfällig!
-                        → Filter reinigen oder austauschen.
+                        → Filter reinigen oder austauschen. Ein verstopfter Filter reduziert
+                          den Volumenstrom erheblich und senkt die ACH.
                     {% elif _akf_age_days | int > 0 %}
-                    • AKF-Alter: {{ _akf_age_days }} Tage / {{ akf_lifetime_days }} Tage Lebensdauer.
-                      Bei stark verstopftem Filter sinkt der Volumenstrom erheblich.
+                    • AKF-Alter: {{ _akf_age_days }} / {{ akf_lifetime_days }} Tage –
+                      noch im Rahmen, aber bei nachlassender Leistung trotzdem prüfen.
                     {% endif %}
-                    {% if _ach | float(-1) > 0 %}
-                    • Berechnete Luftwechselrate (ACH): {{ _ach }} h⁻¹.
-                      Empfohlen: mindestens 20 h⁻¹ für Growzelte.
-                      {% if _ach | float < 20 %}
-                      → ACH zu niedrig – prüfe ob Lüfterdrehzahl korrekt ist oder ob
-                        der Filter den Luftstrom stark drosselt.
-                      {% endif %}
+                    {% if _ext_rh | float(-1) >= 0 and _rh_headroom | float(0) <= 5 %}
+                    ⚠️  Die Raum-RLF ({{ _ext_rh | round(1) }}%) ist bereits sehr hoch.
+                        Der Ablüfter kann die Zelt-RLF physikalisch KAUM weiter absenken!
+                        → Priorität: Raum belüften / entfeuchten (Fenster öffnen, Luftentfeuchter).
                     {% endif %}
                     • Prüfe, ob Lüftungsschläuche geknickt oder verstopft sind.
                     • Prüfe, ob Zu- und Abluftöffnungen frei sind (keine Blockaden).
                     • Prüfe, ob der Lüfter tatsächlich auf voller Leistung läuft
                       (Lüfterdrehzahl / Steuereinheit kontrollieren).
                     • Prüfe auf undichte Stellen im Zelt (Licht- und Lüftungsöffnungen).
-                    {% if _ext_rh | float(-1) >= 0 %}
-
-                    🌡️ Externer Referenzsensor (Raum außerhalb des Zeltes):
-                       Raumtemperatur:  {{ _ext_temp | round(1) if _ext_temp | float(-99) > -99 else 'kein Sensor' }} °C
-                       Raum-RLF:        {{ _ext_rh | round(1) }}%
-
-                    {% if _ext_rh | float >= _tent_rh | float - 5 %}
-                    ⚠️  Die Raumluft hat bereits eine RLF von {{ _ext_rh | round(1) }}%,
-                        was sehr nahe an der Zelt-RLF ({{ _tent_rh | round(1) }}%) liegt.
-                        Abluftbetrieb kann die RLF im Zelt unter diesen Bedingungen NICHT
-                        wesentlich senken!
-                        → Sorge zuerst für ausreichende Raumbelüftung / Entfeuchtung im Raum.
-                    {% else %}
-                    ✅  Raumluft ({{ _ext_rh | round(1) }}% RLF) ist trockener als das Zelt –
-                        Abluftbetrieb sollte prinzipiell die RLF im Zelt senken können.
+                    {% if _ext_rh | float(-1) >= 0 and _rh_headroom | float(0) > 5 %}
+                    ✅  Raumluft ({{ _ext_rh | round(1) }}% RLF) ist ausreichend trockener
+                        als das Zelt – Abluftbetrieb sollte die RLF senken können.
                         Prüfe mechanische Ursachen (Filter, Schläuche, Lüfterdrehzahl).
                     {% endif %}
-                    {% else %}
+                    {% if _ext_rh | float(-1) < 0 %}
                     ℹ️  Kein externer Referenzsensor konfiguriert.
-                        Um zu beurteilen, ob die Raumluft eine weitere Absenkung der Zelt-RLF
-                        erlaubt, einen externen Temp-/RLF-Sensor eintragen.
+                        Externen Temp-/RLF-Sensor eintragen, um zu prüfen, ob die
+                        Raumluft eine weitere Absenkung der Zelt-RLF überhaupt erlaubt.
                     {% endif %}
 
                     Aktueller Zeltstatus:
                       Temp: {{ _tent_temp | round(1) }}°C | RLF: {{ _tent_rh | round(1) }}%
+                      {% if _ext_rh | float(-1) >= 0 %}
+                      Raum: {{ _ext_temp | round(1) if _ext_temp | float(-99) > -99 else '?' }}°C | {{ _ext_rh | round(1) }}% RLF
+                      {% endif %}
                       Phase: {{ growth_phase | capitalize }} – Tag {{ phase_days }} / Woche {{ phase_weeks }}
               - service: !input notify_target
                 data:
