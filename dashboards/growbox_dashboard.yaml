@@ -1,0 +1,185 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# growbox_dashboard.yaml
+#
+# Example Lovelace dashboard for the Growbox Controller blueprint.
+#
+# How to use:
+#   1. Navigate to Settings → Dashboards → Add dashboard → New dashboard
+#      from scratch, give it a name (e.g. "Growbox").
+#   2. Open the dashboard, click the ⋮ menu → Edit dashboard →
+#      Raw configuration editor.
+#   3. Paste the content of this file (from "views:" onwards).
+#   4. Replace all placeholder entity IDs (sensor.xxx, switch.xxx, etc.)
+#      with your actual entity IDs.
+#   5. For multiple chambers, duplicate the entire "Growbox – Chamber 1" view
+#      and update the entity IDs accordingly.
+#
+# Required custom cards (install via HACS):
+#   - mini-graph-card  (github: kalkih/mini-graph-card)
+#   - mushroom-cards   (github: piitaya/lovelace-mushroom)  [optional, nicer UI]
+#
+# All standard cards below work without any custom components.
+# ─────────────────────────────────────────────────────────────────────────────
+
+views:
+  - title: "🌿 Chamber 1"
+    path: growbox_chamber1
+    icon: mdi:sprout
+    cards:
+
+      # ── Header / phase info ─────────────────────────────────────────────────
+      - type: markdown
+        content: >
+          ## 🌿 Chamber 1
+          **Phase:** {{ states('input_select.growbox_chamber1_phase') }}
+          &nbsp;|&nbsp;
+          **Day:** {{ states('sensor.growbox_chamber1_phase_days') }}
+          &nbsp;|&nbsp;
+          **Week:** {{ states('sensor.growbox_chamber1_phase_weeks') }}
+
+      # ── Environment overview ────────────────────────────────────────────────
+      - type: horizontal-stack
+        cards:
+          - type: sensor
+            entity: sensor.growbox_chamber1_temperature   # replace
+            name: Temperature
+            graph: line
+            unit: "°C"
+            icon: mdi:thermometer
+
+          - type: sensor
+            entity: sensor.growbox_chamber1_humidity      # replace
+            name: Humidity (RLF)
+            graph: line
+            unit: "%"
+            icon: mdi:water-percent
+
+          - type: sensor
+            entity: sensor.growbox_chamber1_co2           # replace
+            name: CO₂
+            graph: line
+            unit: ppm
+            icon: mdi:molecule-co2
+
+      - type: horizontal-stack
+        cards:
+          - type: sensor
+            entity: sensor.growbox_chamber1_voc           # replace
+            name: VOC
+            graph: line
+            icon: mdi:chemical-weapon
+
+          - type: sensor
+            entity: sensor.growbox_chamber1_pm25          # replace
+            name: PM2.5
+            graph: line
+            unit: "µg/m³"
+            icon: mdi:air-filter
+
+          - type: sensor
+            entity: sensor.growbox_chamber1_pressure      # replace
+            name: Pressure
+            graph: line
+            unit: hPa
+            icon: mdi:gauge
+
+      # ── Soil & irrigation ───────────────────────────────────────────────────
+      - type: horizontal-stack
+        cards:
+          - type: sensor
+            entity: sensor.growbox_chamber1_soil_moisture # replace
+            name: Soil Moisture
+            graph: line
+            unit: "%"
+            icon: mdi:water
+
+          - type: entity
+            entity: switch.growbox_chamber1_pump          # replace
+            name: Water Pump
+            icon: mdi:pump
+
+      # ── Controls ────────────────────────────────────────────────────────────
+      - type: entities
+        title: "Controls"
+        entities:
+          - entity: switch.growbox_chamber1_light         # replace
+            name: Grow Light
+            icon: mdi:lightbulb
+          - entity: switch.growbox_chamber1_fan           # replace
+            name: Circulation Fan
+            icon: mdi:fan
+          - entity: switch.growbox_chamber1_exhaust       # replace
+            name: Exhaust Fan (Abluft)
+            icon: mdi:fan-speed-3
+          - entity: switch.growbox_chamber1_pump          # replace
+            name: Water Pump
+            icon: mdi:pump
+
+      # ── Plant height ────────────────────────────────────────────────────────
+      - type: entity
+        entity: input_number.growbox_chamber1_plant_height  # replace
+        name: Plant Height (cm)
+        icon: mdi:ruler
+
+      # ── Camera & timelapse ──────────────────────────────────────────────────
+      - type: picture-entity
+        entity: camera.growbox_chamber1                   # replace
+        name: Live Camera
+        show_state: false
+
+      # Timelapse video viewer (plays the compiled MP4)
+      - type: markdown
+        content: >
+          **Timelapse video:**
+          <video controls width="100%"
+            src="/local/timelapse/chamber1_timelapse.mp4">
+            Your browser does not support video playback.
+          </video>
+
+      # Compile timelapse button
+      - type: button
+        name: "🎬 Compile Timelapse"
+        icon: mdi:video
+        tap_action:
+          action: call-service
+          service: script.growbox_compile_timelapse_chamber1   # replace
+        show_name: true
+
+      # ── History graphs ──────────────────────────────────────────────────────
+      - type: history-graph
+        title: "Temperature & Humidity (24 h)"
+        hours_to_show: 24
+        entities:
+          - entity: sensor.growbox_chamber1_temperature   # replace
+            name: Temperature
+          - entity: sensor.growbox_chamber1_humidity      # replace
+            name: Humidity
+
+      - type: history-graph
+        title: "CO₂ & VOC (24 h)"
+        hours_to_show: 24
+        entities:
+          - entity: sensor.growbox_chamber1_co2           # replace
+            name: CO₂
+          - entity: sensor.growbox_chamber1_voc           # replace
+            name: VOC
+
+      - type: history-graph
+        title: "Soil Moisture (7 days)"
+        hours_to_show: 168
+        entities:
+          - entity: sensor.growbox_chamber1_soil_moisture # replace
+            name: Soil Moisture
+
+      # ── Notifications / persistent notifications ────────────────────────────
+      - type: entities
+        title: "Active notifications"
+        entities:
+          - entity: persistent_notification.growbox_phase_chamber_1
+          - entity: persistent_notification.growbox_height_chamber_1
+          - entity: persistent_notification.growbox_repot_chamber_1
+
+  # ── Add a second view for Chamber 2 (duplicate and update entity IDs) ───────
+  # - title: "🌿 Chamber 2"
+  #   path: growbox_chamber2
+  #   ...
